@@ -45,6 +45,8 @@ from geometry_msgs.msg import TransformStamped
 from time import sleep
 from rclpy.node import Node
 from rclpy.time import Time
+from rclpy.clock import Clock, JumpThreshold, TimeJump, ClockChange
+import rclpy.logging
 from rclpy.duration import Duration
 from rclpy.task import Future
 
@@ -65,6 +67,7 @@ class Buffer(tf2.BufferCore, tf2_ros.BufferInterface):
 
     def __init__(
         self,
+        clock: Clock,
         cache_time: Optional[Duration] = None,
         node: Optional[Node] = None
     ) -> None:
@@ -79,6 +82,12 @@ class Buffer(tf2.BufferCore, tf2_ros.BufferInterface):
         else:
             tf2.BufferCore.__init__(self)
         tf2_ros.BufferInterface.__init__(self)
+
+        self.clock = clock
+        self.node = node
+
+        jump_threshold = JumpThreshold(min_forward=None, min_backward=Duration(nanoseconds=-1), on_clock_change=True)
+        self.jump_handler_ = self.clock.create_jump_callback(jump_threshold, post_callback=self._on_time_jump)
 
         self._new_data_callbacks: List[Callable[[], None]] = []
         self._callbacks_to_remove: List[Callable[[], None]] = []
@@ -97,6 +106,14 @@ class Buffer(tf2.BufferCore, tf2_ros.BufferInterface):
     def set_transform(self, transform: TransformStamped, authority: str) -> None:
         super().set_transform(transform, authority)
         self._call_new_data_callbacks()
+
+    def _on_time_jump(self, jump: TimeJump):
+        if ClockChange.ROS_TIME_ACTIVATED == jump.clock_change or ClockChange.ROS_TIME_DEACTIVATED == jump.clock_change:
+            self._get_logger().warn("Detected time source change. Clearing TF buffer.")
+            self.clear()
+        elif jump.delta.nanoseconds < 0:
+            self._get_logger().warn("Detected jump back in time. Clearing TF buffer.")
+            self.clear()
 
     def set_transform_static(self, transform: TransformStamped, authority: str) -> None:
         super().set_transform_static(transform, authority)
@@ -338,3 +355,6 @@ class Buffer(tf2.BufferCore, tf2_ros.BufferInterface):
         fut.add_done_callback(lambda _: self._remove_callback(_on_new_data))
 
         return fut
+
+    def _get_logger(self):
+        return self.node.get_logger() if self.node is not None else rclpy.logging.get_logger("tf2_buffer")
